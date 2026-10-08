@@ -1288,16 +1288,48 @@ const resetEarned = () => {
 // EN: The gold value shown in the split table - same measurement as the goal.
 const goldProgress = () => (goldMode() === 'balance' ? getGold() : sampleEarned());
 
-// DE: Gold pro Sekunde (pausenbewusste Echtzeit). Nur waehrend eines laufenden Laufs
-// DE: sinnvoll; gibt 0 zurueck, solange der Lauf noch nicht gestartet oder
-// DE: weniger als 1 Sekunde vergangen ist (Nulldivision vermieden).
-// EN: Gold per second (pause-aware real time). Only meaningful during an active run;
-// EN: returns 0 before the run starts or when less than 1 second has elapsed
-// EN: (avoids division by zero on the very first frames).
+// DE: Ringspeicher fuer den gleitenden Gold/s-Durchschnitt (letzte 60 Sekunden pausenbewusste Echtzeit).
+// EN: Ring buffer for rolling gold/s average over the last 60 seconds of pause-aware real time.
+let goldRateSamples = []; // { t: number, g: number }[]
+let lastGoldRateSampleTime = 0;
+
+const sampleGoldRate = () => {
+  const run = readRun();
+  if (typeof run.startedAt !== 'number' || typeof run.finishedAt === 'number') {
+    if (goldRateSamples.length > 0) goldRateSamples = [];
+    lastGoldRateSampleTime = 0;
+    return;
+  }
+  const t = elapsed();
+  if (t - lastGoldRateSampleTime < 250) return;
+  lastGoldRateSampleTime = t;
+  const g = goldProgress();
+  goldRateSamples.push({ t, g });
+  const cutoff = t - 60000;
+  while (goldRateSamples.length > 2 && goldRateSamples[0].t < cutoff) {
+    goldRateSamples.shift();
+  }
+};
+
+// DE: Gleitender Durchschnitt Gold pro Sekunde der letzten 60 Sekunden (pausenbewusste Echtzeit).
+// DE: Unter 60 s Laufzeit wird der Durchschnitt seit Laufstart genutzt.
+// EN: Rolling average gold per second over the last 60 seconds (pause-aware real time).
+// EN: Under 60 s elapsed, uses the average since run start.
 const goldPerSec = () => {
-  const sec = elapsed() / 1000;
-  if (sec < 1) return 0;
-  return goldProgress() / sec;
+  const run = readRun();
+  if (typeof run.startedAt !== 'number') return 0;
+  sampleGoldRate();
+  if (goldRateSamples.length < 2) {
+    const sec = elapsed() / 1000;
+    if (sec < 1) return 0;
+    return Math.max(0, goldProgress()) / sec;
+  }
+  const oldest = goldRateSamples[0];
+  const latest = goldRateSamples[goldRateSamples.length - 1];
+  const dt = (latest.t - oldest.t) / 1000;
+  if (dt < 1) return 0;
+  const dg = latest.g - oldest.g;
+  return Math.max(0, dg) / dt;
 };
 
 // DE: Der Wert, gegen den das Ziel der Kategorie geprueft wird.
@@ -4974,6 +5006,7 @@ api.events.on('frame:render', () => {
   // EN: Sampled every frame so quick back-to-back earning and spending
   // EN: doesn't fall through the cracks. Costs only a number comparison.
   if (goldMode() === 'earned') sampleEarned();
+  sampleGoldRate();
 
   const stamp = now();
 
